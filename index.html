@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Hand Cricket</title>
+  <style>
+    body {
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      background-color: black;
+      font-family: Arial, sans-serif;
+      height: 100vh;
+      margin: 0;
+      padding: 20px;
+      gap: 40px;
+    }
+
+    #cameraWrapper {
+      position: relative;
+      width: 640px;
+      height: 480px;
+      background: black;
+    }
+
+    video, canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 640px;
+      height: 480px;
+      transform: scaleX(-1);
+      border: 3px solid white;
+      border-radius: 10px;
+    }
+
+    #rightPanel {
+      background: white;
+      color: black;
+      padding: 20px;
+      border-radius: 10px;
+      min-width: 350px;
+    }
+
+    #info {
+      font-size: 24px;
+      line-height: 1.8;
+    }
+
+    .emoji {
+      font-size: 40px;
+    }
+
+    #gameOver {
+      display: none;
+      text-align: center;
+      margin-top: 20px;
+    }
+
+    #gameOver h2 {
+      font-size: 32px;
+      color: red;
+    }
+
+    #buttons {
+      margin-top: 20px;
+    }
+
+    button {
+      margin: 6px;
+      padding: 10px 20px;
+      font-size: 20px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+    }
+
+    button:hover {
+      opacity: 0.8;
+    }
+
+    .choiceBtn { background: dodgerblue; color: white; }
+    .numBtn { background: green; color: white; }
+  </style>
+</head>
+<body>
+
+  <div id="cameraWrapper">
+    <video id="video" autoplay></video>
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <div id="rightPanel">
+    <div id="tossPhase">
+      <h3>🎲 Toss Time!</h3>
+      <p>Choose Odd or Even:</p>
+      <button class="choiceBtn" onclick="chooseOddEven('odd')">Odd</button>
+      <button class="choiceBtn" onclick="chooseOddEven('even')">Even</button>
+      <div id="tossNumberButtons" style="display:none;">
+        <p>Pick a number (1-6):</p>
+        <div id="numBtns"></div>
+      </div>
+      <div id="tossChoice" style="display:none;">
+        <p>You won the toss! Choose:</p>
+        <button class="choiceBtn" onclick="chooseRole('bat')">Bat</button>
+        <button class="choiceBtn" onclick="chooseRole('bowl')">Bowl</button>
+      </div>
+      <p id="tossResult"></p>
+    </div>
+
+    <div id="info" style="display:none;">
+      <p id="currentInnings">You are: Batting</p>
+      <p id="yourThrow">Your Throw: </p>
+      <p id="computerThrow">Computer: </p>
+      <p id="userScore">Your Score: 0</p>
+      <p id="computerScore">Computer Score: 0</p>
+      <p id="target" style="display:none;">Target: </p>
+      <p id="status">Status: Waiting...</p>
+    </div>
+
+    <div id="gameOver">
+      <h2>🏏 Game Over!</h2>
+      <p id="finalScore"></p>
+      <button id="playAgain">🔄 Play Again</button>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/handpose"></script>
+
+  <script>
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    let model;
+    let userScore = 0;
+    let computerScore = 0;
+    let latestFingers = 0;
+    let lastGesture = null;
+    let gestureStartTime = null;
+    let roundInProgress = false;
+    let gameEnded = false;
+    let tossChoice = null;
+    let batting = false;
+    let gameStarted = false;
+    let firstInningsOver = false;
+    let target = 0;
+
+    const numberEmoji = ["0️⃣", "☝️", "✌️", "🤟", "🖖", "🖐️", "6️⃣"];
+
+    async function setupCamera() {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      video.srcObject = stream;
+      return new Promise(resolve => {
+        video.onloadedmetadata = () => resolve(video);
+      });
+    }
+
+    async function loadModel() {
+      await tf.setBackend("webgl");
+      model = await handpose.load();
+      console.log("✅ Handpose model loaded");
+    }
+
+    function stopCamera() {
+      let stream = video.srcObject;
+      if (stream) {
+        let tracks = stream.getTracks();
+        tracks.forEach(track => track.stop());
+      }
+      video.srcObject = null;
+    }
+
+    function chooseOddEven(choice) {
+      tossChoice = choice;
+      document.getElementById("tossNumberButtons").style.display = "block";
+      let numBtnsDiv = document.getElementById("numBtns");
+      numBtnsDiv.innerHTML = "";
+      for (let i = 1; i <= 6; i++) {
+        let btn = document.createElement("button");
+        btn.className = "numBtn";
+        btn.innerText = i;
+        btn.onclick = () => doToss(i);
+        numBtnsDiv.appendChild(btn);
+      }
+    }
+
+    function chooseRole(choice) {
+      batting = choice === "bat";
+      document.getElementById("tossChoice").style.display = "none";
+      startGame();
+    }
+
+    function doToss(userNum) {
+      const compNum = Math.floor(Math.random() * 6) + 1;
+      const sum = userNum + compNum;
+      const result = sum % 2 === 0 ? "even" : "odd";
+
+      document.getElementById("tossResult").innerText =
+        `You: ${userNum} ${numberEmoji[userNum]} | Computer: ${compNum} ${numberEmoji[compNum]} | Sum = ${sum} (${result.toUpperCase()})`;
+
+      document.getElementById("tossNumberButtons").style.display = "none";
+      if (result === tossChoice) {
+        document.getElementById("tossChoice").style.display = "block";
+      } else {
+        batting = Math.random() < 0.5;
+        startGame();
+      }
+    }
+
+    function startGame() {
+      document.getElementById("tossPhase").style.display = "none";
+      document.getElementById("info").style.display = "block";
+      document.getElementById("currentInnings").innerText = batting ? "You are: Batting" : "You are: Bowling";
+      if (firstInningsOver) {
+        document.getElementById("target").style.display = "block";
+        document.getElementById("target").innerText = `Target: ${target}`;
+      }
+      gameStarted = true;
+      main();
+    }
+
+    function endInnings(computerThrow, userThrow) {
+      if (!firstInningsOver) {
+        firstInningsOver = true;
+        target = batting ? userScore + 1 : computerScore + 1;
+        batting = !batting;
+        document.getElementById("info").style.display = "none";
+        document.getElementById("tossPhase").style.display = "block";
+        document.getElementById("tossResult").innerText = batting
+          ? "First innings over! You bat next."
+          : "First innings over! You bowl next.";
+        document.getElementById("tossNumberButtons").style.display = "none";
+        document.getElementById("tossChoice").style.display = "none";
+        gameStarted = false;
+        setTimeout(() => {
+          document.getElementById("tossPhase").style.display = "none";
+          startGame();
+        }, 2000);
+      } else {
+        endGame(computerThrow, userThrow);
+      }
+    }
+
+    function endGame(computerThrow, userThrow) {
+      gameEnded = true;
+      stopCamera();
+      video.style.display = "none";
+      canvas.style.display = "none";
+      document.getElementById("info").style.display = "none";
+
+      let resultText = `Your Score: ${userScore} | Computer Score: ${computerScore} (You: ${userThrow}, Computer: ${computerThrow})\n`;
+      if (userScore > computerScore) {
+        resultText += "🏆 You Win!";
+      } else if (computerScore > userScore) {
+        resultText += "😢 Computer Wins!";
+      } else {
+        resultText += "🤝 It's a Tie!";
+      }
+      document.getElementById("finalScore").innerText = resultText;
+      document.getElementById("gameOver").style.display = "block";
+    }
+
+    function resetGame() {
+      location.reload();
+    }
+
+    function drawHand(predictions) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (predictions.length > 0) {
+        const landmarks = predictions[0].landmarks;
+        for (let i = 0; i < landmarks.length; i++) {
+          const [x, y] = landmarks[i];
+          ctx.beginPath();
+          ctx.arc(canvas.width - x, y, 5, 0, 2 * Math.PI);
+          ctx.fillStyle = "red";
+          ctx.fill();
+        }
+      }
+    }
+
+    function countFingers(hand) {
+      let lm = hand.landmarks;
+      let fingers = 0;
+      let isRightHand = lm[17][0] < lm[5][0];
+
+      if (isRightHand) {
+        if (lm[4][0] > lm[3][0]) fingers++;
+      } else {
+        if (lm[4][0] < lm[3][0]) fingers++;
+      }
+
+      if (lm[8][1] < lm[6][1]) fingers++;
+      if (lm[12][1] < lm[10][1]) fingers++;
+      if (lm[16][1] < lm[14][1]) fingers++;
+      if (lm[20][1] < lm[18][1]) fingers++;
+
+      return fingers;
+    }
+
+    function playRound(userThrow) {
+      const computerThrow = Math.floor(Math.random() * 6) + 1;
+
+      document.getElementById("yourThrow").innerHTML =
+        "Your Throw: " + userThrow + " " + numberEmoji[userThrow];
+      document.getElementById("computerThrow").innerHTML =
+        "Computer: " + computerThrow + " " + numberEmoji[computerThrow];
+
+      if (userThrow === computerThrow) {
+        document.getElementById("status").innerText = "❌ OUT!";
+        endInnings(computerThrow, userThrow);
+      } else {
+        if (batting) {
+          userScore += userThrow;
+          document.getElementById("status").innerText = "✅ You scored " + userThrow;
+          document.getElementById("userScore").innerText = "Your Score: " + userScore;
+        } else {
+          computerScore += computerThrow;
+          document.getElementById("status").innerText = "✅ Computer scored " + computerThrow;
+          document.getElementById("computerScore").innerText = "Computer Score: " + computerScore;
+        }
+        if (firstInningsOver && batting && userScore >= target) {
+          endGame(computerThrow, userThrow);
+        } else if (firstInningsOver && !batting && computerScore >= target) {
+          endGame(computerThrow, userThrow);
+        }
+      }
+    }
+
+    async function detectHands() {
+      if (!gameStarted || gameEnded) return;
+
+      const predictions = await model.estimateHands(video);
+      drawHand(predictions);
+
+      if (predictions.length > 0) {
+        latestFingers = countFingers(predictions[0]);
+
+        if (latestFingers > 0) {
+          if (lastGesture === latestFingers) {
+            if (!gestureStartTime) gestureStartTime = Date.now();
+            const heldTime = Date.now() - gestureStartTime;
+
+            if (heldTime > 2000 && !roundInProgress) {
+              roundInProgress = true;
+              playRound(latestFingers);
+            }
+          } else {
+            lastGesture = latestFingers;
+            gestureStartTime = Date.now();
+            roundInProgress = false;
+            document.getElementById("status").innerText = "Hold steady...";
+          }
+        }
+      }
+
+      requestAnimationFrame(detectHands);
+    }
+
+    async function main() {
+      await setupCamera();
+      video.play();
+      if (!model) await loadModel();
+      detectHands();
+    }
+
+    document.getElementById("playAgain").addEventListener("click", resetGame);
+  </script>
+</body>
+</html>
